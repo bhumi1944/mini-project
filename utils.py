@@ -1,81 +1,89 @@
-import os
-import uuid
-from datetime import datetime
-from werkzeug.utils import secure_filename
-from flask import current_app, flash
-from flask_login import current_user
-from models import Notification, db
+import re
 
-def allowed_file(filename):
-    """Check if a file has an allowed extension"""
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
 
-def save_file(file, upload_folder=None):
-    """Save a file to the server with a secure unique filename"""
-    if upload_folder is None:
-        upload_folder = current_app.config['UPLOAD_FOLDER']
-    
-    # Make sure the upload folder exists
-    if not os.path.exists(upload_folder):
-        os.makedirs(upload_folder)
-    
-    # Generate a secure filename with a UUID to prevent collisions
-    original_filename = secure_filename(file.filename)
-    extension = original_filename.rsplit('.', 1)[1].lower() if '.' in original_filename else ''
-    filename = f"{uuid.uuid4().hex}.{extension}" if extension else f"{uuid.uuid4().hex}"
-    
-    file_path = os.path.join(upload_folder, filename)
-    file.save(file_path)
-    
-    return filename, file_path
+# https://docs.python.org/3/library/datetime.html#technical-detail (see NOTE #9)
+_DATETIME_STRIP_ZERO_PADDING_FORMATS_RE = re.compile(
+    "%-["
+    "d"  # day of month
+    "m"  # month
+    "H"  # hour (24-hour)
+    "I"  # hour (12-hour)
+    "M"  # minutes
+    "S"  # seconds
+    "U"  # week of year (Sunday first day of week)
+    "W"  # week of year (Monday first day of week)
+    "V"  # week of year (ISO 8601)
+    "]",
+    re.MULTILINE,
+)
 
-def get_file_size(file_path):
-    """Get the size of a file in bytes"""
-    return os.path.getsize(file_path)
 
-def get_file_type(filename):
-    """Get the file extension from a filename"""
-    return filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+def clean_datetime_format_for_strptime(formats):
+    """
+    Remove dashes used to disable zero-padding with strftime formats (for
+    compatibility with strptime).
+    """
+    return [
+        re.sub(
+            _DATETIME_STRIP_ZERO_PADDING_FORMATS_RE,
+            lambda m: m[0].replace("-", ""),
+            format,
+        )
+        for format in formats
+    ]
 
-def format_date(date):
-    """Format a date object to string"""
-    if date:
-        return date.strftime('%Y-%m-%d')
-    return None
 
-def create_notification(user_id, content, related_document_id=None, related_user_id=None):
-    """Create a notification for a user"""
-    notification = Notification(
-        user_id=user_id,
-        content=content,
-        related_document_id=related_document_id,
-        related_user_id=related_user_id
-    )
-    db.session.add(notification)
-    db.session.commit()
-    return notification
+class UnsetValue:
+    """
+    An unset value.
 
-def has_permission(user, document, permission_level):
-    """Check if a user has a specific permission on a document"""
-    # If user is the owner, they have all permissions
-    if document.user_id == user.id:
-        return True
-    
-    # Check if there's a collaboration with the required permission
-    collaboration = next(
-        (collab for collab in document.collaborations if collab.user_id == user.id),
-        None
-    )
-    
-    if not collaboration:
+    This is used in situations where a blank value like `None` is acceptable
+    usually as the default value of a class variable or function parameter
+    (iow, usually when `None` is a valid value.)
+    """
+
+    def __str__(self):
+        return "<unset value>"
+
+    def __repr__(self):
+        return "<unset value>"
+
+    def __bool__(self):
         return False
-    
-    # Define permission hierarchy
-    permission_hierarchy = {
-        'view': ['view', 'comment', 'edit'],
-        'comment': ['comment', 'edit'],
-        'edit': ['edit']
-    }
-    
-    return collaboration.permission in permission_hierarchy.get(permission_level, [])
+
+    def __nonzero__(self):
+        return False
+
+
+unset_value = UnsetValue()
+
+
+class WebobInputWrapper:
+    """
+    Wrap a webob MultiDict for use as passing as `formdata` to Field.
+
+    Since for consistency, we have decided in WTForms to support as input a
+    small subset of the API provided in common between cgi.FieldStorage,
+    Django's QueryDict, and Werkzeug's MultiDict, we need to wrap Webob, the
+    only supported framework whose multidict does not fit this API, but is
+    nevertheless used by a lot of frameworks.
+
+    While we could write a full wrapper to support all the methods, this will
+    undoubtedly result in bugs due to some subtle differences between the
+    various wrappers. So we will keep it simple.
+    """
+
+    def __init__(self, multidict):
+        self._wrapped = multidict
+
+    def __iter__(self):
+        return iter(self._wrapped)
+
+    def __len__(self):
+        return len(self._wrapped)
+
+    def __contains__(self, name):
+        return name in self._wrapped
+
+    def getlist(self, name):
+        return self._wrapped.getall(name)
